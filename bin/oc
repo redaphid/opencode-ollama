@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Launch opencode against the remote Ollama host behind Cloudflare Access.
+set -euo pipefail
+HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP="${OLLAMA_APP_URL:-https://ollama.hypnodroid.com}"
+
+if ! OLLAMA_ACCESS_TOKEN="$(cloudflared access token -app="$APP" 2>/dev/null)" || [ -z "$OLLAMA_ACCESS_TOKEN" ]; then
+  echo "No Cloudflare Access token for $APP; logging in..." >&2
+  cloudflared access login "$APP" >&2
+  OLLAMA_ACCESS_TOKEN="$(cloudflared access token -app="$APP")"
+fi
+
+# A cold 27B load can outlast Cloudflare's 100s limit (502/524); the load still
+# finishes server-side, so retry a tiny request until the model is resident.
+MODEL="${OLLAMA_MODEL:-qwen3.8:27b}"
+for i in 1 2 3 4 5 6; do
+  code="$(curl -s -o /dev/null -w '%{http_code}' -m 130 -H "cf-access-token: $OLLAMA_ACCESS_TOKEN"     "$APP/api/generate" -d "{\"model\":\"$MODEL\",\"keep_alive\":\"30m\"}" || true)"
+  [ "$code" = "200" ] && break
+  echo "Warming $MODEL (attempt $i, HTTP $code)..." >&2
+done
+
+export OLLAMA_ACCESS_TOKEN
+export OPENCODE_HARNESS_DIR="$HARNESS_DIR"
+export OPENCODE_CONFIG="$HARNESS_DIR/config/opencode.json"
+exec opencode "$@"
